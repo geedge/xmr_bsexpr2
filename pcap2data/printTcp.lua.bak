@@ -1,0 +1,331 @@
+-- print(_VERSION)
+-- /usr/local/share/wireshark/init.lua
+local json = require("cjson")
+local md5 = require("md5")
+require "bit32"
+local cj = json.new()
+
+local getTcpStream = Field.new("tcp.stream")
+
+-- ip/tcp info
+local getTos = Field.new("ip.tos")
+local getSeq = Field.new("tcp.seq_raw")
+local getAck = Field.new("tcp.ack_raw")
+
+-- All TCP Flags
+local tfStr = Field.new("tcp.flags.str")
+-- TCP新增的 tcp flags
+local tfCwr = Field.new("tcp.flags.cwr")
+local tfEcn = Field.new("tcp.flags.ecn")
+-- TCP原本的 tcp flags
+local tfUrg = Field.new("tcp.flags.urg")
+local tfAck = Field.new("tcp.flags.ack")
+local tfPush = Field.new("tcp.flags.push")
+local tfReset = Field.new("tcp.flags.reset")
+local tfSyn = Field.new("tcp.flags.syn")
+local tfFin = Field.new("tcp.flags.fin")
+
+local getTcpPayload = Field.new("tcp.len")
+
+-- tls info
+local tlsCerts = Field.new("tls.handshake.certificates")
+local tlsSni = Field.new("tls.handshake.extensions_server_name")
+local tlsCert = Field.new("tls.handshake.certificate")
+
+-- tls info, for generate ja3
+local tlsHandShakeType = Field.new("tls.handshake.type")
+local tlsHandShakeVersion = Field.new("tls.handshake.version")
+local tlsCipher = Field.new("tls.handshake.ciphersuite")
+local tlsExtType = Field.new("tls.handshake.extension.type")
+local tlsExtsg = Field.new("tls.handshake.extensions_supported_group")
+local tlsExtec = Field.new("tls.handshake.extensions_ec_point_format")
+
+-- http 
+local httpUa = Field.new("http.user_agent")
+local httpHost = Field.new("http.host")
+
+local grease_table = {}
+grease_table["2570"] = true
+grease_table["6682"] = true
+grease_table["10794"] = true
+grease_table["14906"] = true
+grease_table["19018"] = true
+grease_table["23130"] = true
+grease_table["27242"] = true
+grease_table["31354"] = true
+grease_table["35466"] = true
+grease_table["39578"] = true
+grease_table["43690"] = true
+grease_table["47802"] = true
+grease_table["51914"] = true
+grease_table["56026"] = true
+grease_table["60138"] = true
+grease_table["64250"] = true
+
+local flows = {}
+
+do
+    local function packet_listener()
+        local tap = Listener.new("frame", "tcp and (!tcp.analysis.retransmission) and !icmp and !icmpv6")
+        -- oicq.command == 2 可见 QQ 号
+        -- frame是监听器的名称，tcp是wireshark过滤器规则
+
+        function tap.reset()
+            -- 开始执行
+        end
+
+        function tap.packet(pinfo, tvb)
+            -- 回调函数，每收到一个包执行一次。
+            local tcp_stream = tonumber( tostring( getTcpStream() ) ) + 1
+            local tcp_payload = tostring( getTcpPayload() )
+            local abs_ts = tostring( pinfo.abs_ts )
+            
+            local tcpflags = ""
+            if( tostring(tfUrg()) == "1") then tcpflags = tcpflags.."U" else tcpflags = tcpflags.."." end
+            if( tostring(tfAck()) == "1" ) then tcpflags = tcpflags.."A" else tcpflags = tcpflags.."." end
+            if( tostring(tfPush()) == "1" ) then tcpflags = tcpflags.."P" else tcpflags = tcpflags.."." end
+            if( tostring(tfReset()) == "1" ) then tcpflags = tcpflags.."R" else tcpflags = tcpflags.."." end
+            if( tostring(tfSyn()) == "1" ) then tcpflags = tcpflags.."S" else tcpflags = tcpflags.."." end
+            if( tostring(tfFin()) == "1" ) then tcpflags = tcpflags.."F" else tcpflags = tcpflags.."." end
+            local direction = ""
+
+            if( not flows[tcp_stream] )
+            then
+                flows[tcp_stream] = {}
+                -- 流的第一个报文一定是 SYN 报文
+                flows[tcp_stream].src_ip = tostring(pinfo.net_src)
+                flows[tcp_stream].src_port = tonumber(pinfo.src_port)
+                flows[tcp_stream].dst_ip = tostring(pinfo.net_dst)
+                flows[tcp_stream].dst_port = tonumber(pinfo.dst_port)
+                flows[tcp_stream].curr_proto = tonumber(pinfo.curr_proto)
+                flows[tcp_stream].pkts = {}
+                flows[tcp_stream].first_time = tostring( pinfo.abs_ts )
+                direction = "c"
+            else
+                if ( tostring(pinfo.net_src) == flows[tcp_stream].src_ip )
+                then
+                    direction = "c"
+                else
+                    direction = "s"
+                end
+            end
+
+            local pkt_info = abs_ts.." "..direction.." "..tcp_payload.." "..tcpflags
+            table.insert(flows[tcp_stream].pkts, pkt_info)
+            flows[tcp_stream].last_time = tostring( pinfo.abs_ts )
+
+            local ack = tonumber( tostring( getAck() ) )
+            local seq = tonumber( tostring( getSeq() ) )
+
+            if( direction == "c" ) then
+                if(flows[tcp_stream].c_maxAck == nil) then
+                    flows[tcp_stream].c_maxAck = ack
+                else
+                    flows[tcp_stream].c_maxAck = math.max(flows[tcp_stream].c_maxAck, ack)
+                end
+
+                if(flows[tcp_stream].c_minSeq == nil) then
+                    flows[tcp_stream].c_minSeq = seq
+                else
+                    flows[tcp_stream].c_minSeq = math.min(flows[tcp_stream].c_minSeq, seq)
+                end
+            end
+
+            if( direction == "s" ) then
+                if(flows[tcp_stream].s_maxAck == nil) then
+                    flows[tcp_stream].s_maxAck = ack
+                else
+                    flows[tcp_stream].s_maxAck = math.max(flows[tcp_stream].s_maxAck, ack)
+                end
+
+                if(flows[tcp_stream].s_minSeq == nil) then
+                    flows[tcp_stream].s_minSeq = seq
+                else
+                    flows[tcp_stream].s_minSeq = math.min(flows[tcp_stream].s_minSeq, seq)
+                end
+            end
+
+            if ( tlsHandShakeType() ) then
+                -- tls.handshake.type == 1 为 Client Hello 报文, 提取 ja3 指纹， tls.handshake.type == 4 为 New Session Ticket 报文
+                local tlshstype = tostring(tlsHandShakeType())
+
+                if ( tlshstype == "1" ) then
+                    if ( tlsSni() ~= nil ) then flows[tcp_stream].sni = tostring( tlsSni() ) end
+                    -- tls.handshake.version
+                    local tlshsv = tostring( tonumber( tostring(tlsHandShakeVersion()) ) )
+                    local cipher_str = ""                
+                    if( tlsCipher() ) then
+                        local ciphers = { tlsCipher() }
+                        for _, cipher in ipairs( ciphers ) do
+                            cipher = tostring(cipher)
+                            if( not grease_table[cipher] ) then
+                                if cipher_str ~= "" then
+                                    cipher_str = cipher_str.."-"..cipher
+                                else
+                                    cipher_str = cipher
+                                end
+                            end
+                        end
+                    end
+
+                    local ext_str = ""
+                    if( tlsExtType() ) then
+                        local exts = { tlsExtType() }
+                        for _, ext in ipairs( exts ) do
+                            -- tls session Ticket
+                            if( tostring(ext) == "35" ) then
+                                local ofs = ext.offset
+                                local s_t_len = tvb:range(ofs + 2, 2):uint()
+                                if( tonumber(s_t_len) ~= 0 ) then
+                                    local s_t = tvb:range(ofs + 4, tonumber(s_t_len)):bytes():tohex()
+                                    flows[tcp_stream].s_t = s_t
+                                end
+                            end
+                            ext = tostring(ext)
+                            if( not grease_table[ext] ) then
+                                if ext_str ~= "" then
+                                    ext_str = ext_str.."-"..ext
+                                else
+                                    ext_str = ext
+                                end
+                            end
+                        end
+                    end
+                    
+                    local sg_str = ""
+                    if( tlsExtsg() ) then
+                        local sgs = { tlsExtsg() }
+                        for _, sg in ipairs( sgs ) do
+                            sg = tostring( tonumber( tostring( sg ) ) )
+                            if( not grease_table[sg] ) then
+                                if sg_str ~= "" then
+                                    sg_str = sg_str.."-"..sg
+                                else
+                                    sg_str = sg
+                                end
+                            end
+                        end
+                    end
+
+                    local ec_str = ""
+                    if( tlsExtec() ) then
+                        local ecs = { tlsExtec() }
+                        for _, ec in ipairs( ecs ) do
+                            ec = tostring(ec)
+                            if ec_str ~= "" then
+                                ec_str = ec_str.."-"..ec
+                            else
+                                ec_str = ec
+                            end
+                        end
+                    end
+
+                    -- lows[tcp_stream].ja3 = tlshsv..","..cipher_str..","..ext_str..","..sg_str..","..ec_str
+                    local ja3 = tlshsv..","..cipher_str..","..ext_str..","..sg_str..","..ec_str
+                    flows[tcp_stream].ja3_md5 = md5.sumhexa( ja3 )
+                
+                -- tls.handshake.type == 11 为证书
+                elseif( tlsCerts() ) then
+                    -- 提取证书信息，证书的编码形式为 ASN.1(T-L-V)，详细可见: https://letsencrypt.org/docs/a-warm-welcome-to-asn1-and-der/
+                    -- 证书链上有多个证书，只需从最后一个证书提取信息即可
+                    local org = "ORG"
+                    local cert = tlsCert().range -- type: TvbRange
+                    local cert_len = cert:len()
+                    -- 直接从证书的 13 为开始处理，跳过前面的证书长度，证书版本字段
+                    local pos = 13
+                    
+                    -- 这个循环跳过：serialNumber,signature,issuer,validity
+                    for i = 1,4,1  do
+                        local type = cert:range(pos, 1)
+                        pos = pos + 1
+                        local len = cert:range(pos, 1):uint()
+                        pos = pos + 1
+                        
+                        if( bit32.band(len,0x80 ) == 0x80 ) then
+                            local to_read = bit32.band(len, 0x7F)
+                            len = cert:range(pos, to_read):uint()
+                            pos = pos + to_read
+                        end
+    
+                        local value = cert:range(pos, len)
+                        pos = pos + len
+                        -- print( value:bytes():tohex() )
+                    end
+
+                    local type = cert:range(pos, 1)
+                    pos = pos + 1
+                    local len = cert:range(pos, 1):uint()
+                    pos = pos + 1
+
+                    if( bit32.band(len,0x80 ) == 0x80 ) then
+                        local to_read = bit32.band(len, 0x7F)
+                        len = cert:range(pos, to_read):uint()
+                        pos = pos + to_read
+                    end
+
+                    -- 此时，value是 subject 中的内容
+                    local subject_value = cert:range(pos, len)
+                    local subject_len = len
+                    local subject_pos = 0
+                    
+                    while( subject_pos < subject_len ) do
+                        subject_pos = subject_pos + 6
+                        local subject_type = subject_value:range(subject_pos, 3)
+                        -- _type == "550406" : id-at-country
+                        -- _type == "550408" : id-at-stateOrProvinceName
+                        -- _type == "550407" : id-at-localityName
+                        -- _type == "55040A" : id-at-organizationName
+                        -- _type == "550403" : id-at-commonName
+                        local _type = subject_type:bytes():tohex() 
+                        subject_pos = subject_pos + 4
+                        local _len = subject_value:range(subject_pos, 1):uint()
+                        subject_pos = subject_pos + 1
+                        org = subject_value:range(subject_pos, _len):string(0x00000002) -- ENC_UTF_8
+                        if( _type == "55040A" ) then
+                            flows[tcp_stream].org = org
+                            -- print( tcp_stream )
+                            -- print( org )
+                        end
+                        subject_pos = subject_pos + _len
+                    end
+
+                end
+            end
+
+            if( httpUa() ) then
+                flows[tcp_stream].ua = tostring( httpUa() )
+                -- flows[tcp_stream].host = tostring( httpHost() )
+            end
+
+            if( httpHost() ) then
+                flows[tcp_stream].host = tostring( httpHost() )
+            end
+        end
+
+        -- tls: org,sni*,
+        -- http: ua,host,ref
+        function tap.draw()
+            -- 结束执行
+            local flow_cnt = 0
+            for k, v in pairs(flows) do
+                flow_cnt = k
+            end
+            
+            for i=1,flow_cnt,1 do
+                -- 计算流的持续时间
+                flows[i].time = tonumber(flows[i].last_time) - tonumber(flows[i].first_time)
+                flows[i].first_time = nil
+                flows[i].last_time = nil
+                -- microsoft
+                if( (flows[i].sni ~= nil) ) then
+                    print( cj.encode(flows[i]) )
+                elseif( flows[i].ua ~= nil ) then
+                    print( cj.encode(flows[i]) )
+                end
+            end
+        end
+    end
+       -- 监听报文
+    packet_listener()
+       -- tcpStreamTable =nil
+end
