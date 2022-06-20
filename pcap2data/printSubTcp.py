@@ -3,7 +3,8 @@ import platform
 from tqdm import tqdm
 from multiprocessing import Pool
 
-rootdir = "/home/xmr/sda3/PCAPS/"
+# 注意，rootdir 应该为实验原始流量文件夹的绝对路径！
+rootdir = "/home/xmr/expr2/data/PCAPS/"
 
 def handle_one_sub_pcap(sub_pcap_path: str, sub_json_path: str):
     print( sub_pcap_path + " " + sub_json_path )

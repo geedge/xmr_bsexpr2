@@ -5,7 +5,8 @@ import json
 from tqdm import tqdm
 from DS import FLOW
 
-rootdir = "/home/xmr/sda3/PCAPS/"
+# 注意，rootdir 应该为实验原始流量文件夹的绝对路径！
+rootdir = "/home/xmr/expr2/data/PCAPS/"
 
 if __name__ == "__main__":
     pcap_files = os.listdir( rootdir )
