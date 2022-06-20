@@ -5,12 +5,12 @@
 - python库：paddlepaddle 2.2.0
 
 ## 实验原始流量
-
+因实验原始流量较大（155GB），所以实验原始流量未在此处给出。
 
 ## 构造实验数据集
 pcap2date 文件夹下
-1. printTcp.lua：提取TCP流特征的 tshark lua 脚本
-2. make_sample_pure.py：构造实验数据集
+1. printSubTcp.py：调用 tshark lua 脚本实现对 TCP 流特征的提取，构造得到的 TCP 流特征文件存储在 /data/raw_data 文件夹下。
+2. make_sample_pure.py：构造实验数据集，构造得到的实验数据集存储在 /data/Syn_Seq/50 文件夹下。
 
 ## 实验二神经网络模型代码
 paddle文件夹下：
